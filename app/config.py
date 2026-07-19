@@ -3,17 +3,15 @@
 DEFAULT_CONFIGS = {
     # Server settings
     "PORT": 5050,
-    "API_KEY": 'your_api_key_here',  # Fallback API key
-
+    "HOST": "0.0.0.0",
     # TTS settings
-    "DEFAULT_VOICE": 'en-US-AvaNeural',
-    "DEFAULT_RESPONSE_FORMAT": 'mp3',
+    "DEFAULT_VOICE": "en-US-AvaNeural",
+    "DEFAULT_RESPONSE_FORMAT": "mp3",
     "DEFAULT_SPEED": 1.0,
-    "DEFAULT_LANGUAGE": 'en-US',
-
+    "DEFAULT_LANGUAGE": "en-US",
     # Feature flags
-    "REQUIRE_API_KEY": True,
+    "REQUIRE_API_KEY": False,
     "REMOVE_FILTER": False,
     "EXPAND_API": True,
     "DETAILED_ERROR_LOGGING": True,
-} 
+}

@@ -1,262 +1,319 @@
 # server.py
 
-from flask import Flask, request, send_file, jsonify, Response
-from gevent.pywsgi import WSGIServer
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response, StreamingResponse
 from dotenv import load_dotenv
 import os
-import traceback
 import json
 import base64
 
 from config import DEFAULT_CONFIGS
 from handle_text import prepare_tts_input_with_context
 from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted
-from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING
+from utils import AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, getenv_bool
+from models import SpeechRequest, ModelListResponse, VoiceListResponse, VoiceDetailListResponse
 
-app = Flask(__name__)
+app = FastAPI(title="Edge TTS - OpenAI Compatible API", openapi_url="/openapi.json", docs_url="/docs")
 load_dotenv()
 
 API_KEY = os.getenv('API_KEY', DEFAULT_CONFIGS["API_KEY"])
 PORT = int(os.getenv('PORT', str(DEFAULT_CONFIGS["PORT"])))
+HOST = os.getenv('HOST', DEFAULT_CONFIGS["HOST"])
 
 DEFAULT_VOICE = os.getenv('DEFAULT_VOICE', DEFAULT_CONFIGS["DEFAULT_VOICE"])
 DEFAULT_RESPONSE_FORMAT = os.getenv('DEFAULT_RESPONSE_FORMAT', DEFAULT_CONFIGS["DEFAULT_RESPONSE_FORMAT"])
 DEFAULT_SPEED = float(os.getenv('DEFAULT_SPEED', str(DEFAULT_CONFIGS["DEFAULT_SPEED"])))
 
-REMOVE_FILTER = getenv_bool('REMOVE_FILTER', DEFAULT_CONFIGS["REMOVE_FILTER"])
-EXPAND_API = getenv_bool('EXPAND_API', DEFAULT_CONFIGS["EXPAND_API"])
 
-# DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'tts-1')
-
-# Currently in "beta" — needs more extensive testing where drop-in replacement warranted
-def generate_sse_audio_stream(text, voice, speed):
-    """Generator function for SSE streaming with JSON events."""
+async def generate_sse_audio_stream(text, voice, speed):
+    """Async generator function for SSE streaming with JSON events."""
     try:
-        # Generate streaming audio chunks and convert to SSE format
         for chunk in generate_speech_stream(text, voice, speed):
-            # Base64 encode the audio chunk
             encoded_audio = base64.b64encode(chunk).decode('utf-8')
-            
-            # Create SSE event for audio delta
             event_data = {
                 "type": "speech.audio.delta",
-                "audio": encoded_audio
+                "audio": encoded_audio,
             }
-            
-            # Format as SSE event
             yield f"data: {json.dumps(event_data)}\n\n"
-        
-        # Send completion event
+
         completion_event = {
             "type": "speech.audio.done",
             "usage": {
-                "input_tokens": len(text.split()),  # Rough estimate
-                "output_tokens": 0,  # Edge TTS doesn't provide this
-                "total_tokens": len(text.split())
-            }
+                "input_tokens": len(text.split()),
+                "output_tokens": 0,
+                "total_tokens": len(text.split()),
+            },
         }
         yield f"data: {json.dumps(completion_event)}\n\n"
-        
+
     except Exception as e:
         print(f"Error during SSE streaming: {e}")
-        # Send error event
-        error_event = {
-            "type": "error",
-            "error": str(e)
-        }
+        error_event = {"type": "error", "error": str(e)}
         yield f"data: {json.dumps(error_event)}\n\n"
 
-# OpenAI endpoint format
-@app.route('/v1/audio/speech', methods=['POST'])
-@app.route('/audio/speech', methods=['POST'])  # Add this line for the alias
-@require_api_key
-def text_to_speech():
-    try:
-        data = request.json
-        if not data or 'input' not in data:
-            return jsonify({"error": "Missing 'input' in request body"}), 400
 
-        text = data.get('input')
-
-        if not REMOVE_FILTER:
-            text = prepare_tts_input_with_context(text)
-
-        # model = data.get('model', DEFAULT_MODEL)
-        voice = data.get('voice', DEFAULT_VOICE)
-        response_format = data.get('response_format', DEFAULT_RESPONSE_FORMAT)
-        speed = float(data.get('speed', DEFAULT_SPEED))
-        
-        # Check stream format - only "sse" triggers streaming
-        stream_format = data.get('stream_format', 'audio')  # 'audio' (default) or 'sse'
-        
-        mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
-        
-        if stream_format == 'sse':
-            # Return SSE streaming response with JSON events
-            def generate_sse():
-                for event in generate_sse_audio_stream(text, voice, speed):
-                    yield event
-            
-            return Response(
-                generate_sse(),
-                mimetype='text/event-stream',
-                headers={
-                    'Content-Type': 'text/event-stream',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                    'X-Accel-Buffering': 'no'  # Disable nginx buffering
-                }
-            )
-        else:
-            # Return raw audio data (like OpenAI) - can be piped to ffplay
-            output_file_path = generate_speech(text, voice, response_format, speed)
-            
-            # Read the file and return raw audio data
-            with open(output_file_path, 'rb') as audio_file:
-                audio_data = audio_file.read()
-            
-            # Clean up the temporary file
-            try:
-                os.unlink(output_file_path)
-            except OSError:
-                pass  # File might already be cleaned up
-            
-            return Response(
-                audio_data,
-                mimetype=mime_type,
-                headers={
-                    'Content-Type': mime_type,
-                    'Content-Length': str(len(audio_data))
-                }
-            )
-            
-    except Exception as e:
-        if DETAILED_ERROR_LOGGING:
-            app.logger.error(f"Error in text_to_speech: {str(e)}\n{traceback.format_exc()}")
-        else:
-            app.logger.error(f"Error in text_to_speech: {str(e)}")
-        # Return a 500 error for unhandled exceptions, which is more standard than 400
-        return jsonify({"error": "An internal server error occurred", "details": str(e)}), 500
-
-# OpenAI endpoint format
-@app.route('/v1/models', methods=['GET', 'POST'])
-@app.route('/models', methods=['GET', 'POST'])
-@app.route('/v1/audio/models', methods=['GET', 'POST'])
-@app.route('/audio/models', methods=['GET', 'POST'])
-def list_models():
-    return jsonify({"models": get_models_formatted()})
-
-# OpenAI endpoint format
-@app.route('/v1/audio/voices', methods=['GET', 'POST'])
-@app.route('/audio/voices', methods=['GET', 'POST'])
-def list_voices_formatted():
-    return jsonify({"voices": get_voices_formatted()})
-
-@app.route('/v1/voices', methods=['GET', 'POST'])
-@app.route('/voices', methods=['GET', 'POST'])
-@require_api_key
-def list_voices():
-    specific_language = None
-
-    data = request.args if request.method == 'GET' else request.json
-    if data and ('language' in data or 'locale' in data):
-        specific_language = data.get('language') if 'language' in data else data.get('locale')
-
-    return jsonify({"voices": get_voices(specific_language)})
-
-@app.route('/v1/voices/all', methods=['GET', 'POST'])
-@app.route('/voices/all', methods=['GET', 'POST'])
-@require_api_key
-def list_all_voices():
-    return jsonify({"voices": get_voices('all')})
-
-"""
-Support for ElevenLabs and Azure AI Speech
-    (currently in beta)
-"""
-
-# http://localhost:5050/elevenlabs/v1/text-to-speech
-# http://localhost:5050/elevenlabs/v1/text-to-speech/en-US-AndrewNeural
-@app.route('/elevenlabs/v1/text-to-speech/<voice_id>', methods=['POST'])
-@require_api_key
-def elevenlabs_tts(voice_id):
-    if not EXPAND_API:
-        return jsonify({"error": f"Endpoint not allowed"}), 500
-    
-    # Parse the incoming JSON payload
-    try:
-        payload = request.json
-        if not payload or 'text' not in payload:
-            return jsonify({"error": "Missing 'text' in request body"}), 400
-    except Exception as e:
-        return jsonify({"error": f"Invalid JSON payload: {str(e)}"}), 400
-
-    text = payload['text']
+# === /v1/audio/speech ===
+@app.post('/v1/audio/speech')
+async def text_to_speech_v1(request: Request, body: SpeechRequest):
+    text = body.input
 
     if not REMOVE_FILTER:
         text = prepare_tts_input_with_context(text)
 
-    voice = voice_id  # ElevenLabs uses the voice_id in the URL
+    voice = body.voice or DEFAULT_VOICE
+    response_format = body.response_format or DEFAULT_RESPONSE_FORMAT
+    speed = body.speed or DEFAULT_SPEED
+    stream_format = body.stream_format or 'audio'
 
-    # Use default settings for edge-tts
-    response_format = 'mp3'
-    speed = DEFAULT_SPEED  # Optional customization via payload.get('speed', DEFAULT_SPEED)
+    mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
 
-    # Generate speech using edge-tts
-    try:
+    if stream_format == 'sse':
+        return StreamingResponse(
+            generate_sse_audio_stream(text, voice, speed),
+            media_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        )
+    else:
         output_file_path = generate_speech(text, voice, response_format, speed)
-    except Exception as e:
-        return jsonify({"error": f"TTS generation failed: {str(e)}"}), 500
 
-    # Return the generated audio file
-    return send_file(output_file_path, mimetype="audio/mpeg", as_attachment=True, download_name="speech.mp3")
+        with open(output_file_path, 'rb') as audio_file:
+            audio_data = audio_file.read()
 
-# tts.speech.microsoft.com/cognitiveservices/v1
-# https://{region}.tts.speech.microsoft.com/cognitiveservices/v1
-# http://localhost:5050/azure/cognitiveservices/v1
-@app.route('/azure/cognitiveservices/v1', methods=['POST'])
-@require_api_key
-def azure_tts():
+        try:
+            os.unlink(output_file_path)
+        except OSError:
+            pass
+
+        return Response(
+            content=audio_data,
+            media_type=mime_type,
+            headers={'Content-Length': str(len(audio_data))},
+        )
+
+
+@app.post('/audio/speech')
+async def text_to_speech(request: Request, body: SpeechRequest):
+    text = body.input
+
+    if not REMOVE_FILTER:
+        text = prepare_tts_input_with_context(text)
+
+    voice = body.voice or DEFAULT_VOICE
+    response_format = body.response_format or DEFAULT_RESPONSE_FORMAT
+    speed = body.speed or DEFAULT_SPEED
+    stream_format = body.stream_format or 'audio'
+
+    mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
+
+    if stream_format == 'sse':
+        return StreamingResponse(
+            generate_sse_audio_stream(text, voice, speed),
+            media_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        )
+    else:
+        output_file_path = generate_speech(text, voice, response_format, speed)
+
+        with open(output_file_path, 'rb') as audio_file:
+            audio_data = audio_file.read()
+
+        try:
+            os.unlink(output_file_path)
+        except OSError:
+            pass
+
+        return Response(
+            content=audio_data,
+            media_type=mime_type,
+            headers={'Content-Length': str(len(audio_data))},
+        )
+
+
+# === /models ===
+@app.get('/v1/models')
+async def list_models_v1():
+    return {"models": get_models_formatted()}
+
+
+@app.post('/v1/models')
+async def list_models_v2():
+    return {"models": get_models_formatted()}
+
+
+@app.get('/models')
+async def list_models_v3():
+    return {"models": get_models_formatted()}
+
+
+@app.post('/models')
+async def list_models_v4():
+    return {"models": get_models_formatted()}
+
+
+@app.get('/v1/audio/models')
+async def list_models_v5():
+    return {"models": get_models_formatted()}
+
+
+@app.post('/v1/audio/models')
+async def list_models_v6():
+    return {"models": get_models_formatted()}
+
+
+@app.get('/audio/models')
+async def list_models_v7():
+    return {"models": get_models_formatted()}
+
+
+@app.post('/audio/models')
+async def list_models_v8():
+    return {"models": get_models_formatted()}
+
+
+# === /voices ===
+@app.get('/v1/audio/voices')
+async def list_voices_formatted_v1():
+    return {"voices": get_voices_formatted()}
+
+
+@app.post('/v1/audio/voices')
+async def list_voices_formatted_v2():
+    return {"voices": get_voices_formatted()}
+
+
+@app.get('/audio/voices')
+async def list_voices_formatted_v3():
+    return {"voices": get_voices_formatted()}
+
+
+@app.post('/audio/voices')
+async def list_voices_formatted_v4():
+    return {"voices": get_voices_formatted()}
+
+
+@app.get('/v1/voices')
+async def list_voices(request: Request):
+    params = request.query_params
+    language = params.get('language') or params.get('locale')
+    return {"voices": get_voices(language)}
+
+
+@app.post('/v1/voices')
+async def list_voices_post(request: Request):
+    params = request.query_params
+    language = params.get('language') or params.get('locale')
+    return {"voices": get_voices(language)}
+
+
+@app.get('/voices')
+async def list_voices_v3(request: Request):
+    params = request.query_params
+    language = params.get('language') or params.get('locale')
+    return {"voices": get_voices(language)}
+
+
+@app.post('/voices')
+async def list_voices_v4(request: Request):
+    params = request.query_params
+    language = params.get('language') or params.get('locale')
+    return {"voices": get_voices(language)}
+
+
+@app.get('/v1/voices/all')
+async def list_all_voices_v1(request: Request):
+    return {"voices": get_voices('all')}
+
+
+@app.post('/v1/voices/all')
+async def list_all_voices_v2(request: Request):
+    return {"voices": get_voices('all')}
+
+
+@app.get('/voices/all')
+async def list_all_voices_v3(request: Request):
+    return {"voices": get_voices('all')}
+
+
+@app.post('/voices/all')
+async def list_all_voices_v4(request: Request):
+    return {"voices": get_voices('all')}
+
+
+# === ElevenLabs ===
+@app.post('/elevenlabs/v1/text-to-speech/{voice_id}')
+async def elevenlabs_tts(voice_id: str, request: Request, body: SpeechRequest):
     if not EXPAND_API:
-        return jsonify({"error": f"Endpoint not allowed"}), 500
-    
-    # Parse the SSML payload
-    try:
-        ssml_data = request.data.decode('utf-8')
-        if not ssml_data:
-            return jsonify({"error": "Missing SSML payload"}), 400
+        raise HTTPException(status_code=500, detail={"error": "Endpoint not allowed"})
 
-        # Extract the text and voice from SSML
+    text = body.input
+
+    if not REMOVE_FILTER:
+        text = prepare_tts_input_with_context(text)
+
+    try:
+        output_file_path = generate_speech(text, voice_id, 'mp3', DEFAULT_SPEED)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {str(e)}"})
+
+    with open(output_file_path, 'rb') as f:
+        audio_data = f.read()
+    os.unlink(output_file_path)
+
+    return Response(content=audio_data, media_type="audio/mpeg", headers={'Content-Disposition': 'attachment; filename=speech.mp3'})
+
+
+# === Azure ===
+@app.post('/azure/cognitiveservices/v1')
+async def azure_tts(request: Request):
+    if not EXPAND_API:
+        raise HTTPException(status_code=500, detail={"error": "Endpoint not allowed"})
+
+    try:
+        ssml_data = await request.text
+        if not ssml_data:
+            raise HTTPException(status_code=400, detail={"error": "Missing SSML payload"})
+
         from xml.etree import ElementTree as ET
         root = ET.fromstring(ssml_data)
         text = root.find('.//{http://www.w3.org/2001/10/synthesis}voice').text
         voice = root.find('.//{http://www.w3.org/2001/10/synthesis}voice').get('name')
     except Exception as e:
-        return jsonify({"error": f"Invalid SSML payload: {str(e)}"}), 400
-
-    # Use default settings for edge-tts
-    response_format = 'mp3'
-    speed = DEFAULT_SPEED
+        raise HTTPException(status_code=400, detail={"error": f"Invalid SSML payload: {str(e)}"})
 
     if not REMOVE_FILTER:
         text = prepare_tts_input_with_context(text)
 
-    # Generate speech using edge-tts
     try:
-        output_file_path = generate_speech(text, voice, response_format, speed)
+        output_file_path = generate_speech(text, voice, 'mp3', DEFAULT_SPEED)
     except Exception as e:
-        return jsonify({"error": f"TTS generation failed: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {str(e)}"})
 
-    # Return the generated audio file
-    return send_file(output_file_path, mimetype="audio/mpeg", as_attachment=True, download_name="speech.mp3")
+    with open(output_file_path, 'rb') as f:
+        audio_data = f.read()
+    os.unlink(output_file_path)
 
-print(f" Edge TTS (Free Azure TTS) Replacement for OpenAI's TTS API")
-print(f" ")
-print(f" * Serving OpenAI Edge TTS")
-print(f" * Server running on http://localhost:{PORT}")
-print(f" * TTS Endpoint: http://localhost:{PORT}/v1/audio/speech")
-print(f" ")
+    return Response(content=audio_data, media_type="audio/mpeg", headers={'Content-Disposition': 'attachment; filename=speech.mp3'})
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
 
 if __name__ == '__main__':
-    http_server = WSGIServer(('0.0.0.0', PORT), app)
-    http_server.serve_forever()
+    import uvicorn
+    print(f" Edge TTS (Free Azure TTS) Replacement for OpenAI's TTS API")
+    print(f" ")
+    print(f" * Serving OpenAI Edge TTS")
+    print(f" * Server running on http://{HOST}:{PORT}")
+    print(f" * TTS Endpoint: http://{HOST}:{PORT}/v1/audio/speech")
+    print(f" ")
+    uvicorn.run(app, host=HOST, port=PORT)

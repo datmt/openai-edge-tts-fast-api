@@ -42,7 +42,7 @@ _(Docker required, obviously)_
 ### Prerequisites
 
 - **Docker** (recommended): Docker and Docker Compose for containerized setup.
-- **Python** (optional): For local development, install dependencies in `requirements.txt`.
+- **UV** (optional): Recommended package manager, install from https://docs.astral.sh/uv/
 - **ffmpeg** (optional): Required for audio format conversion. Optional if sticking to mp3.
 
 ### Installation
