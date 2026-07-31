@@ -1,8 +1,8 @@
-# openai-edge-tts
+# edge-tts-fastapi
 
 A free, OpenAI-compatible text-to-speech API backed by Microsoft Edge Neural TTS. Drop-in replacement for applications using OpenAI's TTS endpoint.
 
-**[Website & Documentation](https://datmt.com)**
+**[Website & Documentation](https://dattm24.com)**
 
 ## Features
 
@@ -26,8 +26,8 @@ docker run -d \
   -e DEFAULT_VOICE=en-US-AriaNeural \
   -e DEFAULT_RESPONSE_FORMAT=mp3 \
   -e DEFAULT_SPEED=1.0 \
-  --name openai-edge-tts \
-  datmt/openai-edge-tts
+  --name edge-tts-fastapi \
+  dattm24/edge-tts-fastapi
 ```
 
 ### Install FFmpeg (optional, for non-mp3 formats)
@@ -36,8 +36,8 @@ docker run -d \
 docker run -d \
   -p 5050:5050 \
   -e INSTALL_FFMPEG_ARG=true \
-  --name openai-edge-tts \
-  datmt/openai-edge-tts
+  --name edge-tts-fastapi \
+  dattm24/edge-tts-fastapi
 ```
 
 ### Docker Compose
@@ -45,8 +45,8 @@ docker run -d \
 ```yaml
 services:
   tts:
-    image: datmt/openai-edge-tts
-    container_name: openai-edge-tts
+    image: dattm24/edge-tts-fastapi
+    container_name: edge-tts-fastapi
     restart: unless-stopped
     ports:
       - "5050:5050"
@@ -214,4 +214,4 @@ Compatible with third-party client integrations. Requires `EXPAND_API=True`.
 
 Built with [edge-tts](https://github.com/donno2048/edge-tts), [FastAPI](https://fastapi.tiangolo.com/), and ❤️.
 
-[Website & Documentation](https://datmt.com)
+[Website & Documentation](https://dattm24.com)
