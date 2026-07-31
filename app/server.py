@@ -9,7 +9,7 @@ import base64
 
 from config import DEFAULT_CONFIGS
 from handle_text import prepare_tts_input_with_context
-from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted
+from tts_handler import generate_speech_async, generate_speech_stream, get_models_formatted, get_voices_async, get_voices_formatted
 from utils import AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, getenv_bool
 from models import SpeechRequest, ModelListResponse, VoiceListResponse, VoiceDetailListResponse
 
@@ -23,6 +23,8 @@ HOST = os.getenv('HOST', DEFAULT_CONFIGS["HOST"])
 DEFAULT_VOICE = os.getenv('DEFAULT_VOICE', DEFAULT_CONFIGS["DEFAULT_VOICE"])
 DEFAULT_RESPONSE_FORMAT = os.getenv('DEFAULT_RESPONSE_FORMAT', DEFAULT_CONFIGS["DEFAULT_RESPONSE_FORMAT"])
 DEFAULT_SPEED = float(os.getenv('DEFAULT_SPEED', str(DEFAULT_CONFIGS["DEFAULT_SPEED"])))
+REMOVE_FILTER = getenv_bool('REMOVE_FILTER', DEFAULT_CONFIGS["REMOVE_FILTER"])
+EXPAND_API = getenv_bool('EXPAND_API', DEFAULT_CONFIGS["EXPAND_API"])
 
 
 async def generate_sse_audio_stream(text, voice, speed):
@@ -78,7 +80,7 @@ async def text_to_speech_v1(request: Request, body: SpeechRequest):
             },
         )
     else:
-        output_file_path = generate_speech(text, voice, response_format, speed)
+        output_file_path = await generate_speech_async(text, voice, response_format, speed)
 
         with open(output_file_path, 'rb') as audio_file:
             audio_data = audio_file.read()
@@ -120,7 +122,7 @@ async def text_to_speech(request: Request, body: SpeechRequest):
             },
         )
     else:
-        output_file_path = generate_speech(text, voice, response_format, speed)
+        output_file_path = await generate_speech_async(text, voice, response_format, speed)
 
         with open(output_file_path, 'rb') as audio_file:
             audio_data = audio_file.read()
@@ -203,48 +205,48 @@ async def list_voices_formatted_v4():
 async def list_voices(request: Request):
     params = request.query_params
     language = params.get('language') or params.get('locale')
-    return {"voices": get_voices(language)}
+    return {"voices": await get_voices_async(language)}
 
 
 @app.post('/v1/voices')
 async def list_voices_post(request: Request):
     params = request.query_params
     language = params.get('language') or params.get('locale')
-    return {"voices": get_voices(language)}
+    return {"voices": await get_voices_async(language)}
 
 
 @app.get('/voices')
 async def list_voices_v3(request: Request):
     params = request.query_params
     language = params.get('language') or params.get('locale')
-    return {"voices": get_voices(language)}
+    return {"voices": await get_voices_async(language)}
 
 
 @app.post('/voices')
 async def list_voices_v4(request: Request):
     params = request.query_params
     language = params.get('language') or params.get('locale')
-    return {"voices": get_voices(language)}
+    return {"voices": await get_voices_async(language)}
 
 
 @app.get('/v1/voices/all')
 async def list_all_voices_v1(request: Request):
-    return {"voices": get_voices('all')}
+    return {"voices": await get_voices_async('all')}
 
 
 @app.post('/v1/voices/all')
 async def list_all_voices_v2(request: Request):
-    return {"voices": get_voices('all')}
+    return {"voices": await get_voices_async('all')}
 
 
 @app.get('/voices/all')
 async def list_all_voices_v3(request: Request):
-    return {"voices": get_voices('all')}
+    return {"voices": await get_voices_async('all')}
 
 
 @app.post('/voices/all')
 async def list_all_voices_v4(request: Request):
-    return {"voices": get_voices('all')}
+    return {"voices": await get_voices_async('all')}
 
 
 # === ElevenLabs ===
@@ -259,7 +261,7 @@ async def elevenlabs_tts(voice_id: str, request: Request, body: SpeechRequest):
         text = prepare_tts_input_with_context(text)
 
     try:
-        output_file_path = generate_speech(text, voice_id, 'mp3', DEFAULT_SPEED)
+        output_file_path = await generate_speech_async(text, voice_id, 'mp3', DEFAULT_SPEED)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {str(e)}"})
 
@@ -292,7 +294,7 @@ async def azure_tts(request: Request):
         text = prepare_tts_input_with_context(text)
 
     try:
-        output_file_path = generate_speech(text, voice, 'mp3', DEFAULT_SPEED)
+        output_file_path = await generate_speech_async(text, voice, 'mp3', DEFAULT_SPEED)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {str(e)}"})
 

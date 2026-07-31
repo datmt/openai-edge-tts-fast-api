@@ -41,7 +41,8 @@ def is_ffmpeg_installed():
         return False
 
 
-async def _generate_audio_stream(text, voice, speed):
+async def generate_speech_stream(text, voice, speed=1.0):
+    """Async generator that yields audio chunks."""
     edge_tts_voice = voice_mapping.get(voice, voice)
 
     try:
@@ -57,11 +58,8 @@ async def _generate_audio_stream(text, voice, speed):
             yield chunk["data"]
 
 
-def generate_speech_stream(text, voice, speed=1.0):
-    return asyncio.run(_generate_audio_stream(text, voice, speed))
-
-
-async def _generate_audio(text, voice, response_format, speed):
+async def generate_speech_async(text, voice, response_format, speed=1.0):
+    """Async version of generate_speech. Returns the path of the generated audio file."""
     edge_tts_voice = voice_mapping.get(voice, voice)
 
     temp_mp3_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
@@ -121,7 +119,14 @@ async def _generate_audio(text, voice, response_format, speed):
     ])
 
     try:
-        subprocess.run(ffmpeg_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, ffmpeg_command, stderr)
     except subprocess.CalledProcessError as e:
         Path(converted_path).unlink(missing_ok=True)
         Path(temp_mp3_path).unlink(missing_ok=True)
@@ -138,10 +143,6 @@ async def _generate_audio(text, voice, response_format, speed):
     return converted_path
 
 
-def generate_speech(text, voice, response_format, speed=1.0):
-    return asyncio.run(_generate_audio(text, voice, response_format, speed))
-
-
 def get_models():
     return model_data
 
@@ -154,7 +155,7 @@ def get_voices_formatted():
     return [{"id": k, "name": v} for k, v in voice_mapping.items()]
 
 
-async def _get_voices(language=None):
+async def get_voices_async(language=None):
     all_voices = await edge_tts.list_voices()
     language = language or DEFAULT_LANGUAGE
     filtered_voices = [
@@ -162,10 +163,6 @@ async def _get_voices(language=None):
         for v in all_voices if language == 'all' or language is None or v['Locale'] == language
     ]
     return filtered_voices
-
-
-def get_voices(language=None):
-    return asyncio.run(_get_voices(language))
 
 
 def speed_to_rate(speed: float) -> str:

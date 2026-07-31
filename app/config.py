@@ -10,6 +10,7 @@ DEFAULT_CONFIGS = {
     "DEFAULT_SPEED": 1.0,
     "DEFAULT_LANGUAGE": "en-US",
     # Feature flags
+    "API_KEY": "",
     "REQUIRE_API_KEY": False,
     "REMOVE_FILTER": False,
     "EXPAND_API": True,
