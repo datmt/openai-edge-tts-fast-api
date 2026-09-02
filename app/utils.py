@@ -2,6 +2,7 @@
 
 from fastapi import Request, HTTPException
 from functools import wraps
+import logging
 import os
 from dotenv import load_dotenv
 
@@ -17,6 +18,18 @@ def getenv_bool(name: str, default: bool = False) -> bool:
 API_KEY = os.getenv('API_KEY', DEFAULT_CONFIGS["API_KEY"])
 REQUIRE_API_KEY = getenv_bool('REQUIRE_API_KEY', DEFAULT_CONFIGS["REQUIRE_API_KEY"])
 DETAILED_ERROR_LOGGING = getenv_bool('DETAILED_ERROR_LOGGING', DEFAULT_CONFIGS["DETAILED_ERROR_LOGGING"])
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'DEBUG' if DETAILED_ERROR_LOGGING else 'INFO')
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+)
+
+
+def get_logger(name: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(LOG_LEVEL)
+    return logger
 
 
 async def require_api_key(request: Request):

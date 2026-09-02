@@ -10,11 +10,13 @@ import base64
 from config import DEFAULT_CONFIGS
 from handle_text import prepare_tts_input_with_context
 from tts_handler import generate_speech_async, generate_speech_stream, get_models_formatted, get_voices_async, get_voices_formatted
-from utils import AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, getenv_bool
+from utils import AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, getenv_bool, get_logger
 from models import SpeechRequest, ModelListResponse, VoiceListResponse, VoiceDetailListResponse
 
 app = FastAPI(title="Edge TTS - OpenAI Compatible API", openapi_url="/openapi.json", docs_url="/docs")
 load_dotenv()
+
+logger = get_logger(__name__)
 
 API_KEY = os.getenv('API_KEY', DEFAULT_CONFIGS["API_KEY"])
 PORT = int(os.getenv('PORT', str(DEFAULT_CONFIGS["PORT"])))
@@ -49,94 +51,78 @@ async def generate_sse_audio_stream(text, voice, speed):
         yield f"data: {json.dumps(completion_event)}\n\n"
 
     except Exception as e:
-        print(f"Error during SSE streaming: {e}")
-        error_event = {"type": "error", "error": str(e)}
+        logger.exception(f"Error during SSE streaming (voice={voice!r}, speed={speed!r}, text_len={len(text)})")
+        error_event = {"type": "error", "error": f"{type(e).__name__}: {e}"}
         yield f"data: {json.dumps(error_event)}\n\n"
+
+
+async def _handle_tts_request(request: Request, body: SpeechRequest):
+    text = body.input
+
+    if not REMOVE_FILTER:
+        text = prepare_tts_input_with_context(text)
+
+    voice = body.voice or DEFAULT_VOICE
+    response_format = body.response_format or DEFAULT_RESPONSE_FORMAT
+    speed = body.speed or DEFAULT_SPEED
+    stream_format = body.stream_format or 'audio'
+
+    logger.debug(
+        "TTS request: path=%s voice=%r response_format=%r speed=%r stream_format=%r "
+        "text_len=%d text_preview=%r",
+        request.url.path, voice, response_format, speed, stream_format,
+        len(text), text[:200],
+    )
+
+    mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
+
+    if stream_format == 'sse':
+        return StreamingResponse(
+            generate_sse_audio_stream(text, voice, speed),
+            media_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        )
+    else:
+        try:
+            output_file_path = await generate_speech_async(text, voice, response_format, speed)
+        except Exception as e:
+            logger.exception(
+                "TTS generation failed: path=%s voice=%r response_format=%r speed=%r text_len=%d",
+                request.url.path, voice, response_format, speed, len(text),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={"error": f"TTS generation failed: {type(e).__name__}: {e}"},
+            )
+
+        with open(output_file_path, 'rb') as audio_file:
+            audio_data = audio_file.read()
+
+        try:
+            os.unlink(output_file_path)
+        except OSError:
+            pass
+
+        return Response(
+            content=audio_data,
+            media_type=mime_type,
+            headers={'Content-Length': str(len(audio_data))},
+        )
 
 
 # === /v1/audio/speech ===
 @app.post('/v1/audio/speech')
 async def text_to_speech_v1(request: Request, body: SpeechRequest):
-    text = body.input
-
-    if not REMOVE_FILTER:
-        text = prepare_tts_input_with_context(text)
-
-    voice = body.voice or DEFAULT_VOICE
-    response_format = body.response_format or DEFAULT_RESPONSE_FORMAT
-    speed = body.speed or DEFAULT_SPEED
-    stream_format = body.stream_format or 'audio'
-
-    mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
-
-    if stream_format == 'sse':
-        return StreamingResponse(
-            generate_sse_audio_stream(text, voice, speed),
-            media_type='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no',
-            },
-        )
-    else:
-        output_file_path = await generate_speech_async(text, voice, response_format, speed)
-
-        with open(output_file_path, 'rb') as audio_file:
-            audio_data = audio_file.read()
-
-        try:
-            os.unlink(output_file_path)
-        except OSError:
-            pass
-
-        return Response(
-            content=audio_data,
-            media_type=mime_type,
-            headers={'Content-Length': str(len(audio_data))},
-        )
+    return await _handle_tts_request(request, body)
 
 
 @app.post('/audio/speech')
 async def text_to_speech(request: Request, body: SpeechRequest):
-    text = body.input
-
-    if not REMOVE_FILTER:
-        text = prepare_tts_input_with_context(text)
-
-    voice = body.voice or DEFAULT_VOICE
-    response_format = body.response_format or DEFAULT_RESPONSE_FORMAT
-    speed = body.speed or DEFAULT_SPEED
-    stream_format = body.stream_format or 'audio'
-
-    mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
-
-    if stream_format == 'sse':
-        return StreamingResponse(
-            generate_sse_audio_stream(text, voice, speed),
-            media_type='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no',
-            },
-        )
-    else:
-        output_file_path = await generate_speech_async(text, voice, response_format, speed)
-
-        with open(output_file_path, 'rb') as audio_file:
-            audio_data = audio_file.read()
-
-        try:
-            os.unlink(output_file_path)
-        except OSError:
-            pass
-
-        return Response(
-            content=audio_data,
-            media_type=mime_type,
-            headers={'Content-Length': str(len(audio_data))},
-        )
+    return await _handle_tts_request(request, body)
 
 
 # === /models ===
@@ -260,10 +246,16 @@ async def elevenlabs_tts(voice_id: str, request: Request, body: SpeechRequest):
     if not REMOVE_FILTER:
         text = prepare_tts_input_with_context(text)
 
+    logger.debug(
+        "ElevenLabs TTS request: voice_id=%r text_len=%d text_preview=%r",
+        voice_id, len(text), text[:200],
+    )
+
     try:
         output_file_path = await generate_speech_async(text, voice_id, 'mp3', DEFAULT_SPEED)
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {str(e)}"})
+        logger.exception("ElevenLabs TTS generation failed: voice_id=%r text_len=%d", voice_id, len(text))
+        raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {type(e).__name__}: {e}"})
 
     with open(output_file_path, 'rb') as f:
         audio_data = f.read()
@@ -288,15 +280,19 @@ async def azure_tts(request: Request):
         text = root.find('.//{http://www.w3.org/2001/10/synthesis}voice').text
         voice = root.find('.//{http://www.w3.org/2001/10/synthesis}voice').get('name')
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": f"Invalid SSML payload: {str(e)}"})
+        logger.exception("Invalid Azure SSML payload: %r", ssml_data[:500])
+        raise HTTPException(status_code=400, detail={"error": f"Invalid SSML payload: {type(e).__name__}: {e}"})
 
     if not REMOVE_FILTER:
         text = prepare_tts_input_with_context(text)
 
+    logger.debug("Azure TTS request: voice=%r text_len=%d text_preview=%r", voice, len(text), text[:200])
+
     try:
         output_file_path = await generate_speech_async(text, voice, 'mp3', DEFAULT_SPEED)
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {str(e)}"})
+        logger.exception("Azure TTS generation failed: voice=%r text_len=%d", voice, len(text))
+        raise HTTPException(status_code=500, detail={"error": f"TTS generation failed: {type(e).__name__}: {e}"})
 
     with open(output_file_path, 'rb') as f:
         audio_data = f.read()

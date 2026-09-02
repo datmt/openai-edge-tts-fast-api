@@ -7,8 +7,10 @@ import subprocess
 import os
 from pathlib import Path
 
-from utils import DETAILED_ERROR_LOGGING
+from utils import DETAILED_ERROR_LOGGING, get_logger
 from config import DEFAULT_CONFIGS
+
+logger = get_logger(__name__)
 
 DEFAULT_LANGUAGE = os.getenv('DEFAULT_LANGUAGE', DEFAULT_CONFIGS["DEFAULT_LANGUAGE"])
 
@@ -45,22 +47,36 @@ async def generate_speech_stream(text, voice, speed=1.0):
     """Async generator that yields audio chunks."""
     edge_tts_voice = voice_mapping.get(voice, voice)
 
+    logger.debug("generate_speech_stream: voice=%r -> edge_tts_voice=%r speed=%r text_len=%d", voice, edge_tts_voice, speed, len(text))
+
     try:
         speed_rate = speed_to_rate(speed)
     except Exception as e:
-        print(f"Error converting speed: {e}. Defaulting to +0%.")
+        logger.warning("Error converting speed=%r: %s. Defaulting to +0%%.", speed, e)
         speed_rate = "+0%"
 
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
 
-    async for chunk in communicator.stream():
-        if chunk["type"] == "audio":
-            yield chunk["data"]
+    try:
+        async for chunk in communicator.stream():
+            if chunk["type"] == "audio":
+                yield chunk["data"]
+    except Exception as e:
+        logger.exception(
+            "edge_tts streaming failed: voice=%r (mapped=%r) rate=%r text_len=%d",
+            voice, edge_tts_voice, speed_rate, len(text),
+        )
+        raise RuntimeError(f"edge_tts streaming failed for voice={edge_tts_voice!r}: {type(e).__name__}: {e}") from e
 
 
 async def generate_speech_async(text, voice, response_format, speed=1.0):
     """Async version of generate_speech. Returns the path of the generated audio file."""
     edge_tts_voice = voice_mapping.get(voice, voice)
+
+    logger.debug(
+        "generate_speech_async: voice=%r -> edge_tts_voice=%r response_format=%r speed=%r text_len=%d",
+        voice, edge_tts_voice, response_format, speed, len(text),
+    )
 
     temp_mp3_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
     temp_mp3_path = temp_mp3_file_obj.name
@@ -70,21 +86,25 @@ async def generate_speech_async(text, voice, response_format, speed=1.0):
         try:
             speed_rate = speed_to_rate(speed)
         except Exception as e:
-            print(f"Error converting speed: {e}. Defaulting to +0%.")
+            logger.warning("Error converting speed=%r: %s. Defaulting to +0%%.", speed, e)
             speed_rate = "+0%"
 
         communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
         await communicator.save(temp_mp3_path)
 
-    except Exception:
+    except Exception as e:
         Path(temp_mp3_path).unlink(missing_ok=True)
-        raise
+        logger.exception(
+            "edge_tts save failed: voice=%r (mapped=%r) response_format=%r speed=%r text_len=%d",
+            voice, edge_tts_voice, response_format, speed, len(text),
+        )
+        raise RuntimeError(f"edge_tts save failed for voice={edge_tts_voice!r}: {type(e).__name__}: {e}") from e
 
     if response_format == "mp3":
         return temp_mp3_path
 
     if not is_ffmpeg_installed():
-        print("FFmpeg is not available. Returning unmodified mp3 file.")
+        logger.warning("FFmpeg is not available. Returning unmodified mp3 file.")
         return temp_mp3_path
 
     converted_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=f".{response_format}")
@@ -132,12 +152,11 @@ async def generate_speech_async(text, voice, response_format, speed=1.0):
         Path(temp_mp3_path).unlink(missing_ok=True)
 
         if DETAILED_ERROR_LOGGING:
-            error_message = f"FFmpeg error during audio conversion. Command: '{' '.join(e.cmd)}'. Stderr: {e.stderr.decode('utf-8', 'ignore')}"
-            print(error_message)
+            error_message = f"FFmpeg error during audio conversion (voice={voice!r}, format={response_format!r}). Command: '{' '.join(e.cmd)}'. Stderr: {e.stderr.decode('utf-8', 'ignore')}"
         else:
             error_message = f"FFmpeg error during audio conversion: {e}"
-            print(error_message)
-        raise RuntimeError(f"FFmpeg error during audio conversion: {e}")
+        logger.exception(error_message)
+        raise RuntimeError(error_message)
 
     Path(temp_mp3_path).unlink(missing_ok=True)
     return converted_path
