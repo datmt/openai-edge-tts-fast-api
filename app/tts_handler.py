@@ -14,6 +14,10 @@ logger = get_logger(__name__)
 
 DEFAULT_LANGUAGE = os.getenv('DEFAULT_LANGUAGE', DEFAULT_CONFIGS["DEFAULT_LANGUAGE"])
 
+# edge_tts read timeout is dropped by aiohttp once the websocket is up, so a silent
+# Microsoft side hangs forever; cap the whole synthesis instead.
+TTS_TIMEOUT_SECONDS = float(os.getenv('TTS_TIMEOUT_SECONDS', '45'))
+
 voice_mapping = {
     'alloy': 'en-US-JennyNeural',
     'ash': 'en-US-AndrewNeural',
@@ -58,9 +62,10 @@ async def generate_speech_stream(text, voice, speed=1.0):
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
 
     try:
-        async for chunk in communicator.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
+        async with asyncio.timeout(TTS_TIMEOUT_SECONDS):
+            async for chunk in communicator.stream():
+                if chunk["type"] == "audio":
+                    yield chunk["data"]
     except Exception as e:
         logger.exception(
             "edge_tts streaming failed: voice=%r (mapped=%r) rate=%r text_len=%d",
@@ -90,7 +95,7 @@ async def generate_speech_async(text, voice, response_format, speed=1.0):
             speed_rate = "+0%"
 
         communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
-        await communicator.save(temp_mp3_path)
+        await asyncio.wait_for(communicator.save(temp_mp3_path), TTS_TIMEOUT_SECONDS)
 
     except Exception as e:
         Path(temp_mp3_path).unlink(missing_ok=True)
