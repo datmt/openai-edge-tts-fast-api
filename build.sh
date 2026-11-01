@@ -7,7 +7,8 @@ PLATFORM=${PLATFORM:-linux/amd64,linux/arm64}
 
 echo "Building ${IMAGE_NAME}:${IMAGE_TAG} for ${PLATFORM}"
 
-docker buildx create --name multiarch --use 2>/dev/null || true
+docker buildx create --name multiarch 2>/dev/null || true
+docker buildx use multiarch
 
 docker buildx build \
   "${DOCKER_BUILD_ARGS[@]}" \
